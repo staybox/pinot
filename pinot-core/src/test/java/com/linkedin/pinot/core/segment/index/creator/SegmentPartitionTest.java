@@ -178,6 +178,62 @@ public class SegmentPartitionTest {
   }
 
   /**
+   * Unit test for {@link PartitionSegmentPruner}.
+   * <ul>
+   *   <li> Generates queries with in predicate on partitioned column with random values. </li>
+   *   <li> Ensures that if any column values that are in partition range ([0 5]) do not prune the segment,
+   *        whereas other values do. </li>
+   *   <li> Ensures that predicates on non-partitioned columns do not prune the segment. </li>
+   * </ul>
+   */
+  @Test
+  public void testPrunerIn() {
+    Pql2Compiler compiler = new Pql2Compiler();
+    PartitionSegmentPruner pruner = new PartitionSegmentPruner();
+
+    Random random = new Random(System.nanoTime());
+    for (int i = 0; i < 1000; i++) {
+      int columnValue = Math.abs(random.nextInt());
+      int columnValue1 = Math.abs(random.nextInt());
+
+      // Test for partitioned column.
+      String query = buildInQuery(TABLE_NAME, PARTITIONED_COLUMN_NAME, columnValue, columnValue1);
+      BrokerRequest brokerRequest = compiler.compileToBrokerRequest(query);
+      FilterQueryTree filterQueryTree = RequestUtils.generateFilterQueryTree(brokerRequest);
+
+      Assert.assertEquals(pruner.prune(_segment, filterQueryTree), ((columnValue % NUM_PARTITIONS > MAX_PARTITION_VALUE)
+              && (columnValue1 % NUM_PARTITIONS > MAX_PARTITION_VALUE)),
+          "Failed for column values: " + columnValue + ", " + columnValue1);
+
+      // Test for non partitioned column.
+      query = buildInQuery(TABLE_NAME, NON_PARTITIONED_COLUMN_NAME, columnValue, columnValue1);
+      brokerRequest = compiler.compileToBrokerRequest(query);
+      filterQueryTree = RequestUtils.generateFilterQueryTree(brokerRequest);
+      Assert.assertFalse(pruner.prune(_segment, filterQueryTree));
+
+      // Test for AND query: Segment can be pruned out if partitioned column has value outside of range.
+      int partitionColumnValue = Math.abs(random.nextInt());
+      int partitionColumnValue1 = Math.abs(random.nextInt());
+      int nonPartitionColumnValue = random.nextInt();
+      query = buildInAndQuery(TABLE_NAME, PARTITIONED_COLUMN_NAME, partitionColumnValue, partitionColumnValue1,
+          NON_PARTITIONED_COLUMN_NAME, nonPartitionColumnValue, FilterOperator.AND);
+
+      brokerRequest = compiler.compileToBrokerRequest(query);
+      filterQueryTree = RequestUtils.generateFilterQueryTree(brokerRequest);
+      Assert.assertEquals(pruner.prune(_segment, filterQueryTree),
+          (((partitionColumnValue % NUM_PARTITIONS) > MAX_PARTITION_VALUE)
+              && ((partitionColumnValue1 % NUM_PARTITIONS) > MAX_PARTITION_VALUE)));
+
+      // Test for OR query: Segment should never be pruned as there's an OR with non partitioned column.
+      query = buildInAndQuery(TABLE_NAME, PARTITIONED_COLUMN_NAME, partitionColumnValue, partitionColumnValue1, NON_PARTITIONED_COLUMN_NAME,
+          nonPartitionColumnValue, FilterOperator.OR);
+      brokerRequest = compiler.compileToBrokerRequest(query);
+      filterQueryTree = RequestUtils.generateFilterQueryTree(brokerRequest);
+      Assert.assertFalse(pruner.prune(_segment, filterQueryTree));
+    }
+  }
+
+  /**
    * Unit test for utility the converts String ranges into IntRanges and back.
    * <ul>
    *   <li> Generates a list of String ranges</li>
@@ -270,9 +326,21 @@ public class SegmentPartitionTest {
     return "select count(*) from " + tableName + " where " + columnName + " = " + predicateValue;
   }
 
+  private String buildInQuery(String tableName, String columnName, int predicateValue, int predicateValue1) {
+    return "select count(*) from " + tableName + " where " + columnName + " in (" + predicateValue + ", "
+        + predicateValue1 + ")";
+  }
+
   private String buildAndQuery(String tableName, String partitionColumn, int partitionedColumnValue,
       String nonPartitionColumn, int nonPartitionedColumnValue, FilterOperator operator) {
     return "select count(*) from " + tableName + " where " + partitionColumn + " = " + partitionedColumnValue + " "
+        + operator + " " + nonPartitionColumn + " = " + nonPartitionedColumnValue;
+  }
+
+  private String buildInAndQuery(String tableName, String partitionColumn, int partitionedColumnValue,
+      int partitionedColumnValue1, String nonPartitionColumn, int nonPartitionedColumnValue, FilterOperator operator) {
+    return "select count(*) from " + tableName + " where " + partitionColumn + " in (" + partitionedColumnValue + ", "
+        + partitionedColumnValue1 + ") "
         + operator + " " + nonPartitionColumn + " = " + nonPartitionedColumnValue;
   }
 
@@ -292,6 +360,7 @@ public class SegmentPartitionTest {
   private void buildSegment()
       throws Exception {
     Schema schema = new Schema();
+    schema.setSchemaName("SegmentPartitionTest");
     schema.addField(new DimensionFieldSpec(PARTITIONED_COLUMN_NAME, FieldSpec.DataType.INT, true));
     schema.addField(new DimensionFieldSpec(NON_PARTITIONED_COLUMN_NAME, FieldSpec.DataType.INT, true));
 

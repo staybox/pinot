@@ -16,12 +16,14 @@
 package com.linkedin.pinot.core.query.pruner;
 
 import com.linkedin.pinot.common.query.ServerQueryRequest;
+import com.google.common.base.Splitter;
 import com.linkedin.pinot.common.request.FilterOperator;
 import com.linkedin.pinot.common.utils.request.FilterQueryTree;
 import com.linkedin.pinot.core.data.partition.PartitionFunction;
 import com.linkedin.pinot.core.indexsegment.IndexSegment;
 import com.linkedin.pinot.core.segment.index.ColumnMetadata;
 import com.linkedin.pinot.core.segment.index.SegmentMetadataImpl;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.apache.commons.configuration.Configuration;
@@ -32,6 +34,7 @@ import org.apache.commons.lang.math.IntRange;
  * Implementation of {@link SegmentPruner} that uses partition information to perform pruning.
  */
 public class PartitionSegmentPruner extends AbstractSegmentPruner {
+  public static final String IN_CLAUSE_DELIMITER = "\t\t";
   @Override
   public void init(Configuration config) {
 
@@ -82,8 +85,9 @@ public class PartitionSegmentPruner extends AbstractSegmentPruner {
       return pruneNonLeaf(filterQueryTree, columnMetadataMap);
     }
 
+    FilterOperator operator = filterQueryTree.getOperator();
     // TODO: Enhance partition based pruning for RANGE operator.
-    if (filterQueryTree.getOperator() != FilterOperator.EQUALITY) {
+    if ((operator != FilterOperator.EQUALITY) && (operator != FilterOperator.IN)) {
       return false;
     }
 
@@ -99,8 +103,41 @@ public class PartitionSegmentPruner extends AbstractSegmentPruner {
       return false;
     }
 
-    Comparable value = getValue(filterQueryTree.getValue().get(0), metadata.getDataType());
     PartitionFunction partitionFunction = metadata.getPartitionFunction();
+
+    if (operator == FilterOperator.EQUALITY) {
+      return pruneEquality(filterQueryTree, metadata, partitionRanges, partitionFunction);
+    }
+
+    return pruneIn(filterQueryTree, metadata, partitionRanges, partitionFunction);
+  }
+
+  private boolean pruneIn(FilterQueryTree filterQueryTree, ColumnMetadata metadata, List<IntRange> partitionRanges,
+      PartitionFunction partitionFunction) {
+    Splitter valueSplitter = Splitter.on(IN_CLAUSE_DELIMITER);
+
+    List<String> values = valueSplitter.splitToList(filterQueryTree.getValue().get(0));
+
+    List<Integer> partitions;
+    partitions = new ArrayList<Integer>();
+
+    for (String value : values) {
+      partitions.add(partitionFunction.getPartition(getValue(value, metadata.getDataType())));
+    }
+
+    for (IntRange partitionRange : partitionRanges) {
+      for (int partition : partitions) {
+        if (partitionRange.containsInteger(partition)) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  private boolean pruneEquality(FilterQueryTree filterQueryTree, ColumnMetadata metadata,
+      List<IntRange> partitionRanges, PartitionFunction partitionFunction) {
+    Comparable value = getValue(filterQueryTree.getValue().get(0), metadata.getDataType());
     int partition = partitionFunction.getPartition(value);
 
     for (IntRange partitionRange : partitionRanges) {
